@@ -36,4 +36,9 @@ export type CandleRow = {
   ruleState?: StateKey;
   learnedState?: StateKey;
   learnedConfidence?: number;
+  rv?: number;
+  zret?: number;
+  state?: StateKey;
+  session?: "ASIA" | "EU" | "US";
+  volBucket?: "low" | "mid" | "high";
 };

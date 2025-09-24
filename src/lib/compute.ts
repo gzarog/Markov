@@ -191,6 +191,7 @@ export function computeAll(
     row.ruleState = ruleStates[index];
     row.learnedState = regime.learnedStates[index] ?? undefined;
     row.learnedConfidence = regime.confidence[index];
+    row.state = states[index];
   });
 
   const window = cfg.window;

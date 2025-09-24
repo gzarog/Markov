@@ -1,4 +1,5 @@
 import { IDX, StateKey, STATES } from "../types/market";
+import type { CandleRow } from "../types/market";
 
 const STATE_COUNT = STATES.length;
 
@@ -250,4 +251,88 @@ export function stateProbabilityVector(probs: number[]) {
 export function expectedDirectionalMove(probs: number[]) {
   const payoff: Record<StateKey, number> = { D: -1, R: 0.3, B: 0, U: 1 };
   return probs.reduce((acc, value, index) => acc + value * payoff[STATES[index]], 0);
+}
+
+function zeros(rows: number, cols: number) {
+  return Array.from({ length: rows }, () => Array(cols).fill(0));
+}
+
+export function buildTransitionCounts(
+  rows: CandleRow[],
+  opts: { decay?: number; bucketFn?: (row: CandleRow) => string | undefined }
+): Record<string, number[][]> | number[][] {
+  const decay = opts.decay ?? 1;
+  const byBucket = typeof opts.bucketFn === "function";
+  const globalCounts = zeros(STATE_COUNT, STATE_COUNT);
+  const bucketMap: Record<string, number[][]> = {};
+
+  if (!rows.length) {
+    return byBucket ? { global: globalCounts } : globalCounts;
+  }
+
+  for (let i = 1; i < rows.length; i++) {
+    const prev = rows[i - 1].state as StateKey | undefined;
+    const curr = rows[i].state as StateKey | undefined;
+    if (!prev || !curr) continue;
+    const from = IDX[prev];
+    const to = IDX[curr];
+    if (from === undefined || to === undefined) continue;
+    const age = rows.length - 1 - i;
+    const weight = Math.pow(decay, Math.max(age, 0));
+    globalCounts[from][to] += weight;
+    if (byBucket) {
+      const key = opts.bucketFn!(rows[i]) ?? "global";
+      if (!bucketMap[key]) bucketMap[key] = zeros(STATE_COUNT, STATE_COUNT);
+      bucketMap[key][from][to] += weight;
+    }
+  }
+
+  return byBucket ? { global: globalCounts, ...bucketMap } : globalCounts;
+}
+
+export function smoothCountsToProbs(counts: number[][], alpha = 0.75) {
+  return counts.map((row) => {
+    const total = row.reduce((acc, value) => acc + value, 0);
+    return row.map((value) => (value + alpha) / (total + alpha * STATE_COUNT));
+  });
+}
+
+export function blendMatrices(bucket: number[][] | undefined, global: number[][], beta = 0.6) {
+  if (!bucket) return global;
+  const out = zeros(STATE_COUNT, STATE_COUNT);
+  for (let i = 0; i < STATE_COUNT; i++) {
+    for (let j = 0; j < STATE_COUNT; j++) {
+      out[i][j] = beta * bucket[i][j] + (1 - beta) * global[i][j];
+    }
+  }
+  return out;
+}
+
+export function stepDistribution(dist: number[], mat: number[][]) {
+  const next = Array(STATE_COUNT).fill(0);
+  for (let i = 0; i < STATE_COUNT; i++) {
+    for (let j = 0; j < STATE_COUNT; j++) {
+      next[j] += dist[i] * mat[i][j];
+    }
+  }
+  return next;
+}
+
+export function forecastDistribution(params: { mat: number[][]; startState: StateKey; steps: number }) {
+  let dist = Array(STATE_COUNT).fill(0);
+  dist[IDX[params.startState]] = 1;
+  for (let k = 0; k < params.steps; k++) {
+    dist = stepDistribution(dist, params.mat);
+  }
+  return dist;
+}
+
+export function distEntropy(probabilities: number[]) {
+  const base = Math.log(STATE_COUNT);
+  return base === 0
+    ? 0
+    : -probabilities.reduce((acc, value) => {
+        if (value <= 0) return acc;
+        return acc + value * Math.log(value);
+      }, 0) / base;
 }
