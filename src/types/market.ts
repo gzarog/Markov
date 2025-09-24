@@ -19,6 +19,7 @@ export type CandleRow = {
   ma200_slope?: number;
   atr14?: number;
   rsi?: number;
+  rsi14?: number;
   stochK?: number;
   stochD?: number;
   ret1?: number;

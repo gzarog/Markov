@@ -30,7 +30,14 @@ import {
   distEntropy,
 } from "./lib/markov";
 import { computeIndicators, bucketVolSession } from "./lib/features";
-import { stochRsiGate, emaRetestGate } from "./lib/entries";
+import {
+  stochRsiGate,
+  emaRetestGate,
+  emaTrendGate,
+  ma200BiasGate,
+  rsiGate,
+  confluenceScore,
+} from "./lib/entries";
 import { entropySizing, edgeAfterCosts } from "./lib/sizing";
 import { atrStopTake } from "./lib/exits";
 import { positionSizeUSD, stochrsiFilterPass, suggestTradeLevels } from "./lib/trading";
@@ -177,38 +184,47 @@ export default function App(){
         suggestion = { reason: "No clear probabilistic bias" };
       } else if (votes.upVotes < 2 && votes.downVotes < 2) {
         suggestion = { reason: "Low agreement across horizons" };
-      } else if (!stochRsiGate(currentRow, bias)) {
-        suggestion = { reason: "Oscillator misaligned for timing" };
-      } else if (!emaRetestGate(currentRow, bias)) {
-        suggestion = { reason: "EMA structure not satisfied" };
-      } else if (!Number.isFinite(currentRow.atr14) || !Number.isFinite(currentRow.close)) {
-        suggestion = { reason: "Insufficient indicator coverage" };
       } else {
-        const rv = Number.isFinite(currentRow.rv) ? (currentRow.rv as number) : 0;
-        const approxEdge = (upP - downP) * Math.max(rv, 1e-4);
-        const taker = (takerBps ?? 0) / 10000;
-        const maker = (makerBps ?? 0) / 10000;
-        const fundingCost = (fundingBpsPer8h / 10000) * (2 / 8);
-        const netEdge = edgeAfterCosts(approxEdge, maker, taker, fundingCost);
-        if (netEdge <= 0) {
-          suggestion = { reason: "Edge does not clear costs" };
+        const gates = {
+          stoch: stochRsiGate(currentRow, bias),
+          emaRetest: emaRetestGate(currentRow, bias),
+          emaTrend: emaTrendGate(currentRow, bias),
+          ma200Bias: ma200BiasGate(currentRow, bias),
+          rsi: rsiGate(currentRow, bias),
+        } as const;
+        const conf = confluenceScore(currentRow, bias);
+        if (conf < 0.55) {
+          suggestion = { reason: `Low confluence (${(conf * 100).toFixed(0)}%)`, gates };
+        } else if (!Number.isFinite(currentRow.atr14) || !Number.isFinite(currentRow.close)) {
+          suggestion = { reason: "Insufficient indicator coverage" };
         } else {
-          const size = entropySizing(primary.entropy, 1);
-          const entry = currentRow.close;
-          const { sl, tp } = atrStopTake(entry, currentRow.atr14 ?? 0, bias, {
-            s: 1.2 - 0.3 * size,
-            t: 1.8 + 0.6 * size,
-          });
-          suggestion = {
-            side: bias,
-            entry,
-            stop: sl,
-            take: tp,
-            size,
-            netEdge,
-            horizon: "2h",
-            details: { upP, downP, bucketKey },
-          };
+          const rv = Number.isFinite(currentRow.rv) ? (currentRow.rv as number) : 0;
+          const approxEdge = (upP - downP) * Math.max(rv, 1e-4);
+          const taker = (takerBps ?? 0) / 10000;
+          const maker = (makerBps ?? 0) / 10000;
+          const fundingCost = (fundingBpsPer8h / 10000) * (2 / 8);
+          const netEdge = edgeAfterCosts(approxEdge, maker, taker, fundingCost);
+          if (netEdge <= 0) {
+            suggestion = { reason: "Edge does not clear costs" };
+          } else {
+            const entropySize = entropySizing(primary.entropy, 1);
+            const size = entropySize * (0.5 + 0.5 * conf);
+            const entry = currentRow.close;
+            const { sl, tp } = atrStopTake(entry, currentRow.atr14 ?? 0, bias, {
+              s: 1.2 - 0.2 * conf,
+              t: 1.8 + 0.8 * conf,
+            });
+            suggestion = {
+              side: bias,
+              entry,
+              stop: sl,
+              take: tp,
+              size,
+              netEdge,
+              horizon: "2h",
+              details: { upP, downP, bucketKey, confluence: conf, gates },
+            };
+          }
         }
       }
     }
@@ -533,6 +549,13 @@ const oneStep = useMemo(() => {
               </div>
               <div className="text-xs text-gray-500">
                 P(U): {(volPanel.suggestion.details.upP * 100).toFixed(1)}% · P(D): {(volPanel.suggestion.details.downP * 100).toFixed(1)}%
+              </div>
+              <div className="text-xs text-gray-500">
+                Confluence {(volPanel.suggestion.details.confluence * 100).toFixed(0)}% — gates:
+                <span className="ml-1">
+                  stoch {volPanel.suggestion.details.gates.stoch ? "✓" : "×"}, emaRetest {volPanel.suggestion.details.gates.emaRetest ? "✓" : "×"},
+                  emaTrend {volPanel.suggestion.details.gates.emaTrend ? "✓" : "×"}, ma200 {volPanel.suggestion.details.gates.ma200Bias ? "✓" : "×"}, rsi {volPanel.suggestion.details.gates.rsi ? "✓" : "×"}
+                </span>
               </div>
             </div>
           ) : (

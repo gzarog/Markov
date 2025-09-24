@@ -164,6 +164,7 @@ export function computeAll(
       ma200_slope: ma200_slope[i],
       atr14: atr[i],
       rsi: rsi[i],
+      rsi14: rsi[i],
       stochK: st.k[i],
       stochD: st.d[i],
       logRet: logReturns[i],

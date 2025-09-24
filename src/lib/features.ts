@@ -1,4 +1,4 @@
-import { atr14, ema, rsi14, stochRsi } from "./indicators";
+import { atr14, ema, movingAverage, rsi14, stochRsi } from "./indicators";
 import type { CandleRow } from "./types";
 
 function rollingStats(values: number[], window: number) {
@@ -23,11 +23,12 @@ export function computeIndicators(rows: CandleRow[]): CandleRow[] {
   const highs = rows.map((row) => row.high);
   const lows = rows.map((row) => row.low);
 
+  const ema10 = ema(closes, 10);
   const ema50 = ema(closes, 50);
-  const ma200 = ema(closes, 200);
+  const ma200 = movingAverage(closes, 200);
   const atr = atr14(highs, lows, closes);
-  const rsi = rsi14(closes);
-  const { k: stochK, d: stochD } = stochRsi(rsi);
+  const rsiSeries = rsi14(closes);
+  const { k: stochK, d: stochD } = stochRsi(rsiSeries);
 
   const logReturns = closes.map((close, index) => (index === 0 ? 0 : Math.log(close / closes[index - 1])));
   const { means: retMeans, stds: retStd } = rollingStats(logReturns, 20);
@@ -48,14 +49,19 @@ export function computeIndicators(rows: CandleRow[]): CandleRow[] {
     const bucket: "low" | "mid" | "high" = rv <= q1 ? "low" : rv <= q2 ? "mid" : "high";
     const ma = ma200[index];
     const prevMa = index > 0 ? ma200[index - 1] : ma;
-    const slope = ma !== undefined && prevMa !== undefined ? ma - prevMa : undefined;
+    const slope = Number.isFinite(ma) && Number.isFinite(prevMa) ? ma - prevMa : undefined;
+
+    const rsiValue = Number.isFinite(rsiSeries[index]) ? rsiSeries[index] : row.rsi;
 
     return {
       ...row,
+      ema10: ema10[index],
       ema50: ema50[index],
       ma200: ma,
       ma200_slope: slope,
       atr14: atr[index],
+      rsi: rsiValue,
+      rsi14: rsiValue,
       stochK: stochK[index],
       stochD: stochD[index],
       rv,
