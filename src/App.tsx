@@ -40,6 +40,7 @@ import {
 } from "./lib/entries";
 import { entropySizing, edgeAfterCosts } from "./lib/sizing";
 import { atrStopTake } from "./lib/exits";
+import { zoneFromProbs, confidenceBadge, type ConfidenceZone } from "./lib/zones";
 import { positionSizeUSD, stochrsiFilterPass, suggestTradeLevels } from "./lib/trading";
 import { CandleRow, IDX, STATES, StateKey } from "./types/market";
 
@@ -132,13 +133,17 @@ export default function App(){
     return { matGlobal, matByBucket };
   }, [enrichedRows]);
 
-  const volPanel = useMemo(() => {
-    if (!calc || !enrichedRows.length || !volMatrices?.matGlobal) return null as null | {
-      forecasts: Record<string, { probs: number[]; entropy: number; bias: StateKey }>;
-      bucketKey: string;
-      agreement: { upVotes: number; downVotes: number };
-      suggestion: any;
-    };
+  type ForecastEntry = { probs: number[]; entropy: number; bias: StateKey };
+  type VolPanelState = {
+    forecasts: Record<string, ForecastEntry>;
+    zones: Record<string, ConfidenceZone>;
+    bucketKey: string;
+    agreement: { upVotes: number; downVotes: number };
+    suggestion: any;
+  };
+
+  const volPanel = useMemo<VolPanelState | null>(() => {
+    if (!calc || !enrichedRows.length || !volMatrices?.matGlobal) return null;
 
     const currentRow = enrichedRows[enrichedRows.length - 1];
     const startState = (calc.curState ?? currentRow?.state ?? "B") as StateKey;
@@ -155,7 +160,7 @@ export default function App(){
       "4h": 4 * barsPerHour,
       "6h": 6 * barsPerHour,
     };
-    const forecasts = Object.fromEntries(
+    const forecasts: Record<string, ForecastEntry> = Object.fromEntries(
       Object.entries(horizonSteps).map(([label, steps]) => {
         const probs = forecastDistribution({ mat, startState, steps });
         const max = Math.max(...probs);
@@ -165,6 +170,11 @@ export default function App(){
       })
     );
 
+    const zones: Record<string, ConfidenceZone> = {};
+    Object.entries(forecasts).forEach(([label, forecast]) => {
+      zones[label] = zoneFromProbs(forecast.probs);
+    });
+
     const votes = { upVotes: 0, downVotes: 0 };
     Object.values(forecasts).forEach((forecast) => {
       if (forecast.bias === "U") votes.upVotes++;
@@ -173,6 +183,9 @@ export default function App(){
 
     let suggestion: any = null;
     const primary = forecasts["2h"] ?? Object.values(forecasts)[0];
+    const primaryZone = primary ? zones["2h"] ?? zoneFromProbs(primary.probs) : null;
+    const fallbackZone: ConfidenceZone =
+      primaryZone ?? { level: "Low", weight: 0, maxProb: 0, topState: "B" };
     if (currentRow && primary) {
       const upP = primary.probs[IDX["U"]];
       const downP = primary.probs[IDX["D"]];
@@ -193,7 +206,9 @@ export default function App(){
           rsi: rsiGate(currentRow, bias),
         } as const;
         const conf = confluenceScore(currentRow, bias);
-        if (conf < 0.55) {
+        const confCut =
+          fallbackZone.level === "High" ? 0.5 : fallbackZone.level === "Medium" ? 0.55 : 0.6;
+        if (conf < confCut) {
           suggestion = { reason: `Low confluence (${(conf * 100).toFixed(0)}%)`, gates };
         } else if (!Number.isFinite(currentRow.atr14) || !Number.isFinite(currentRow.close)) {
           suggestion = { reason: "Insufficient indicator coverage" };
@@ -208,11 +223,12 @@ export default function App(){
             suggestion = { reason: "Edge does not clear costs" };
           } else {
             const entropySize = entropySizing(primary.entropy, 1);
-            const size = entropySize * (0.5 + 0.5 * conf);
+            const zoneBoost = 0.9 + 0.4 * fallbackZone.weight;
+            const size = entropySize * (0.5 + 0.5 * conf) * zoneBoost;
             const entry = currentRow.close;
             const { sl, tp } = atrStopTake(entry, currentRow.atr14 ?? 0, bias, {
               s: 1.2 - 0.2 * conf,
-              t: 1.8 + 0.8 * conf,
+              t: 1.8 + 0.8 * conf + 0.4 * fallbackZone.weight,
             });
             suggestion = {
               side: bias,
@@ -222,14 +238,14 @@ export default function App(){
               size,
               netEdge,
               horizon: "2h",
-              details: { upP, downP, bucketKey, confluence: conf, gates },
+              details: { upP, downP, bucketKey, confluence: conf, gates, zone: fallbackZone },
             };
           }
         }
       }
     }
 
-    return { forecasts, bucketKey, agreement: votes, suggestion };
+    return { forecasts, zones, bucketKey, agreement: votes, suggestion };
   }, [calc, enrichedRows, volMatrices, useVolConditioning, interval, takerBps, makerBps, fundingBpsPer8h]);
 
   // alignment shading timeline
@@ -499,26 +515,52 @@ const oneStep = useMemo(() => {
           Bucket: <b>{volPanel.bucketKey}</b> · Agreement ↑<b>{volPanel.agreement.upVotes}</b> / ↓<b>{volPanel.agreement.downVotes}</b>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {Object.entries(volPanel.forecasts).map(([label, forecast]) => (
-            <div key={label} className="border rounded-lg p-2 bg-slate-50">
-              <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-              <div className="text-sm mt-1">
-                Bias: <b>{forecast.bias}</b>
+          {Object.entries(volPanel.forecasts).map(([label, forecast]) => {
+            const zone = volPanel.zones[label] ?? zoneFromProbs(forecast.probs);
+            return (
+              <div key={label} className="border rounded-lg p-2 bg-slate-50">
+                <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
+                <div className="text-sm mt-1">
+                  Bias: <b>{forecast.bias}</b>
+                </div>
+                <div className="text-xs text-gray-500">Entropy: {forecast.entropy.toFixed(3)}</div>
+                <div className="mt-2 h-[80px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={STATES.map((state) => ({ state, p: forecast.probs[IDX[state]] }))}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="state" />
+                      <YAxis domain={[0, 1]} hide />
+                      <Tooltip formatter={(v: any) => (Number(v) * 100).toFixed(1) + "%"} />
+                      <Bar dataKey="p" fill="#0ea5e9" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-3">
+                  <div className="flex h-3 w-full overflow-hidden rounded">
+                    {STATES.map((state) => {
+                      const prob = forecast.probs[IDX[state]];
+                      return (
+                        <div
+                          key={state}
+                          style={{
+                            width: `${(prob * 100).toFixed(2)}%`,
+                            background: confidenceBadge.colorByState[state],
+                          }}
+                          title={`${state} ${(prob * 100).toFixed(1)}%`}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1 text-xs flex items-center gap-2 text-gray-600">
+                    {confidenceBadge.render(zone)}
+                    <span className="text-[11px]">
+                      maxP {(zone.maxProb * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div className="text-xs text-gray-500">Entropy: {forecast.entropy.toFixed(3)}</div>
-              <div className="mt-2 h-[80px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={STATES.map((state) => ({ state, p: forecast.probs[IDX[state]] }))}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="state" />
-                    <YAxis domain={[0, 1]} hide />
-                    <Tooltip formatter={(v: any) => (Number(v) * 100).toFixed(1) + "%"} />
-                    <Bar dataKey="p" fill="#0ea5e9" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <div className="border rounded-lg p-3 bg-white shadow-inner">
           {volPanel.suggestion && volPanel.suggestion.side ? (
@@ -549,6 +591,12 @@ const oneStep = useMemo(() => {
               </div>
               <div className="text-xs text-gray-500">
                 P(U): {(volPanel.suggestion.details.upP * 100).toFixed(1)}% · P(D): {(volPanel.suggestion.details.downP * 100).toFixed(1)}%
+              </div>
+              <div className="text-xs text-gray-500 flex items-center gap-2">
+                {confidenceBadge.render(volPanel.suggestion.details.zone)}
+                <span>
+                  Zone <b>{volPanel.suggestion.details.zone.level}</b> — top {volPanel.suggestion.details.zone.topState} {(volPanel.suggestion.details.zone.maxProb * 100).toFixed(0)}%
+                </span>
               </div>
               <div className="text-xs text-gray-500">
                 Confluence {(volPanel.suggestion.details.confluence * 100).toFixed(0)}% — gates:
