@@ -23,6 +23,24 @@ export function rollingMean(arr: number[], n: number) {
   return out;
 }
 
+export function rollingStd(arr: number[], n: number) {
+  const out = new Array(arr.length).fill(NaN) as number[];
+  const window: number[] = [];
+  for (let i = 0; i < arr.length; i++) {
+    const value = arr[i];
+    window.push(value);
+    if (window.length > n) {
+      window.shift();
+    }
+    if (window.length === n && window.every(isFiniteNum)) {
+      const mean = window.reduce((acc, v) => acc + v, 0) / n;
+      const variance = window.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / n;
+      out[i] = Math.sqrt(Math.max(variance, 0));
+    }
+  }
+  return out;
+}
+
 export function ema(arr: number[], span: number) {
   if (!arr.length) return [] as number[];
   const k = 2 / (span + 1);

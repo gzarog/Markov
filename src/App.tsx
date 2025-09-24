@@ -34,6 +34,10 @@ export default function App(){
   const [halfLife, setHalfLife] = useState(300);
   const [smooth, setSmooth] = useState(0.5);
   const [horizons, setHorizons] = useState<number[]>([1,2,4,6]);
+  const [order, setOrder] = useState(1);
+  const [dirichlet, setDirichlet] = useState(2);
+  const [autoHalfLife, setAutoHalfLife] = useState(true);
+  const [confidenceGate, setConfidenceGate] = useState(0.45);
   const [refreshSel, setRefreshSel] = useState(5); // minutes
 
   // Trade panel
@@ -53,9 +57,16 @@ export default function App(){
   const refreshMs = useMemo(()=> refreshSel>0? refreshSel*60*1000 : null, [refreshSel]);
 
   const cfg = useMemo(()=>({
-    window: windowN, halfLife, smooth, horizons,
-    intervalMinutes: Number(interval)
-  }), [windowN, halfLife, smooth, horizons, interval]);
+    window: windowN,
+    halfLife,
+    smooth,
+    horizons,
+    intervalMinutes: Number(interval),
+    order,
+    dirichlet,
+    autoHalfLife,
+    confidenceGate,
+  }), [windowN, halfLife, smooth, horizons, interval, order, dirichlet, autoHalfLife, confidenceGate]);
 
   const {data: candles, error, loading, refetch} = useBybitData({symbol, interval, limit, refreshMs});
 
@@ -73,9 +84,15 @@ export default function App(){
     const vals = new Array(rows.length).fill(0) as number[];
     for(let t=250; t<rows.length-nearest; t++){
       const histStates = states.slice(0,t+1);
-      const {probs} = buildMarkovWeighted(histStates, windowN, smooth, halfLife);
+      const {probs} = buildMarkovWeighted(histStates, {
+        window: windowN,
+        smoothing: smooth,
+        halfLife,
+        order,
+        dirichletStrength: dirichlet,
+      });
       const cur = histStates[histStates.length-1] as StateKey;
-      const prow = semiMarkovAdjustFirstRow(probs[IDX[cur]], histStates);
+      const prow = semiMarkovAdjustFirstRow(probs[IDX[cur]], histStates, { smoothing: 0.35 });
       const vec = multiStepForecast(probs, cur, {k: nearest}, prow)["k"];
       const up = vec[IDX['U']] > vec[IDX['D']];
       const kNow = rows[t].stochK ?? NaN;
@@ -83,7 +100,7 @@ export default function App(){
       if(pass){ vals[t] = up? +1 : -1; }
     }
     return vals;
-  }, [calc, horizons, interval, windowN, smooth, halfLife, stochLo, stochHi]);
+  }, [calc, horizons, interval, windowN, smooth, halfLife, order, dirichlet, stochLo, stochHi]);
 
 // One-step forecast (current state row), with and without semi-Markov adjustment
 const oneStep = useMemo(() => {
@@ -99,17 +116,19 @@ const oneStep = useMemo(() => {
   const tradeText = useMemo(()=>{
     if(!calc) return "";
     const last:CandleRow = calc.rows[calc.rows.length-1];
-    const lines = ["Trade suggestions (EMA50 retest + StochRSI timing):"];
+    const bias = calc.forecastBias;
+    const biasText = `Bias → U ${(bias.bullish*100).toFixed(1)}% | D ${(bias.bearish*100).toFixed(1)}% | conf ${(bias.confidence*100).toFixed(0)}%`;
+    const lines = ["Trade suggestions (EMA50 retest + StochRSI timing):", biasText];
     (["short","long"] as const).forEach((side)=>{
-      const f = stochrsiFilterPass(last.stochK ?? NaN, side as any, stochMode, stochLo, stochHi);
+      const f = stochrsiFilterPass(last.stochK ?? NaN, side as any, stochMode, stochLo, stochHi, bias);
       lines.push(`- ${side.toUpperCase()} oscillator check: ${f.note}`);
       if(!f.ok){ lines.push("  → BLOCKED by StochRSI."); return; }
-      const lv = suggestTradeLevels(last, calc.rows as CandleRow[], side as any, riskMode, rr, atrSL, atrTP, f.penalty);
+      const lv = suggestTradeLevels(last, calc.rows as CandleRow[], side as any, riskMode, rr, atrSL, atrTP, f.penalty, bias);
       const sz = positionSizeUSD(account, riskPct, lv.entry, lv.stop, leverage, takerBps, makerBps);
       lines.push(`  Entry: ${lv.entry.toFixed(6)}  Stop: ${lv.stop.toFixed(6)}  Target: ${lv.target.toFixed(6)}`);
       if(isFiniteNum(sz.notional)){ lines.push(`  Sizing: ~${sz.notional.toFixed(2)} USDT notional  (~${(sz.qty).toFixed(2)} coins)  @x${leverage}  fees≈${(2*takerBps).toFixed(1)} bps total`); }
     });
-    return lines.join('');
+    return lines.join('\n');
   }, [calc, stochMode, stochLo, stochHi, riskMode, rr, atrSL, atrTP, account, riskPct, leverage, takerBps, makerBps]);
 
   const footerText = useMemo(()=>{
@@ -141,6 +160,21 @@ const oneStep = useMemo(() => {
           </div>
           <div className="min-w-[110px]"><div className="text-[10px] sm:text-xs text-gray-600">Smoothing</div>
             <input type="number" step="0.1" className="border rounded px-2 py-1 w-full" value={smooth} onChange={e=>setSmooth(Number(e.target.value))}/>
+          </div>
+          <div className="min-w-[100px]"><div className="text-[10px] sm:text-xs text-gray-600">Order</div>
+            <input type="number" className="border rounded px-2 py-1 w-full" min={1} step={1} value={order} onChange={e=>setOrder(Math.max(1, Number(e.target.value)))} />
+          </div>
+          <div className="min-w-[120px]"><div className="text-[10px] sm:text-xs text-gray-600">Dirichlet</div>
+            <input type="number" step="0.5" className="border rounded px-2 py-1 w-full" value={dirichlet} onChange={e=>setDirichlet(Number(e.target.value))}/>
+          </div>
+          <div className="min-w-[140px]"><div className="text-[10px] sm:text-xs text-gray-600">Half-life mode</div>
+            <select className="border rounded px-2 py-1 w-full" value={autoHalfLife ? "auto" : "manual"} onChange={e=>setAutoHalfLife(e.target.value === "auto")}>
+              <option value="auto">Auto</option>
+              <option value="manual">Manual</option>
+            </select>
+          </div>
+          <div className="min-w-[130px]"><div className="text-[10px] sm:text-xs text-gray-600">Confidence gate</div>
+            <input type="number" step="0.05" min={0} max={1} className="border rounded px-2 py-1 w-full" value={confidenceGate} onChange={e=>setConfidenceGate(Math.min(1, Math.max(0, Number(e.target.value))))}/>
           </div>
           <div className="min-w-[150px]"><div className="text-[10px] sm:text-xs text-gray-600">Horizons (h)</div>
             <select multiple className="border rounded px-2 py-1 w-full" value={horizons.map(String)} onChange={e=>{
@@ -178,6 +212,10 @@ const oneStep = useMemo(() => {
             <NumL label="Taker bps" value={takerBps} set={setTakerBps} />
             <NumL label="Maker bps" value={makerBps} set={setMakerBps} />
           </div>
+          <NumL label="Order" value={order} set={(value)=>setOrder(Math.max(1, value))} />
+          <NumL label="Dirichlet" value={dirichlet} set={setDirichlet} step={0.5} />
+          <SelectL label="Half-life mode" value={autoHalfLife ? 'auto' : 'manual'} onChange={v=>setAutoHalfLife(v === 'auto')} options={['auto','manual']} />
+          <NumL label="Conf gate" value={confidenceGate} set={(value)=>setConfidenceGate(Math.min(1, Math.max(0, value)))} step={0.05} />
         </div>
       </details>
 
@@ -200,9 +238,15 @@ const oneStep = useMemo(() => {
             <NumL label="Taker bps" value={takerBps} set={setTakerBps} />
             <NumL label="Maker bps" value={makerBps} set={setMakerBps} />
           </div>
+          <NumL label="Order" value={order} set={(value)=>setOrder(Math.max(1, value))} />
+          <NumL label="Dirichlet" value={dirichlet} set={setDirichlet} step={0.5} />
+          <SelectL label="Half-life mode" value={autoHalfLife ? 'auto' : 'manual'} onChange={v=>setAutoHalfLife(v === 'auto')} options={['auto','manual']} />
+          <NumL label="Conf gate" value={confidenceGate} set={(value)=>setConfidenceGate(Math.min(1, Math.max(0, value)))} step={0.05} />
         </div>
       </div>
+    
     </div>
+
   );
 
   return (
@@ -270,6 +314,49 @@ const oneStep = useMemo(() => {
             ))}
           </BarChart>
         </ResponsiveContainer>
+      </div>
+    )}
+  </SectionCard>
+
+  {/* Diagnostics */}
+  <SectionCard
+    title="Model diagnostics"
+    right={calc && calc.metrics ? <span className="subtle-text">samples: <b>{calc.metrics.count}</b></span> : undefined}
+  >
+    {!calc ? (
+      <div className="text-sm text-gray-500">{loading ? "Loading…" : "No diagnostics"}</div>
+    ) : (
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
+        <div>
+          Half-life used: <b>{calc.model.halfLifeUsed}</b> {calc.model.halfLifeUsed !== halfLife ? "(auto)" : ""}
+        </div>
+        <div>
+          Order/context: <b>{calc.model.order}</b> / {calc.model.contextDepth}
+        </div>
+        <div>
+          Dirichlet strength: <b>{calc.model.dirichletStrength.toFixed(2)}</b>
+        </div>
+        <div>
+          Log-likelihood: <b>{isFiniteNum(calc.metrics.logLikelihood) ? calc.metrics.logLikelihood.toFixed(4) : "n/a"}</b>
+        </div>
+        <div>
+          Brier: <b>{isFiniteNum(calc.metrics.brier) ? calc.metrics.brier.toFixed(4) : "n/a"}</b>
+        </div>
+        <div>
+          Accuracy: <b>{isFiniteNum(calc.metrics.accuracy) ? (calc.metrics.accuracy * 100).toFixed(1) + "%" : "n/a"}</b>
+        </div>
+        <div>
+          Current regime: <b>{calc.curState}</b>
+        </div>
+        <div>
+          Rule vs learned: <b>{calc.ruleStates?.[calc.rows.length-1]}</b> → <b>{calc.learnedStates?.[calc.rows.length-1] ?? "-"}</b>
+        </div>
+        <div>
+          Learned confidence: <b>{isFiniteNum(calc.rows[calc.rows.length-1]?.learnedConfidence) ? (calc.rows[calc.rows.length-1].learnedConfidence! * 100).toFixed(0) + "%" : "n/a"}</b>
+        </div>
+        <div>
+          Quantum expected move: <b>{calc.quantum.expectedMove.toFixed(3)}</b>
+        </div>
       </div>
     )}
   </SectionCard>
