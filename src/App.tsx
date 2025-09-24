@@ -19,8 +19,11 @@ import { NumL, SelectL } from "./components/common/FormControls";
 import { useBybitData } from "./hooks/useBybitData";
 import { computeAll } from "./lib/compute";
 import { isFiniteNum } from "./lib/utils";
-import { buildMarkovWeighted, multiStepForecast, semiMarkovAdjustFirstRow } from "./lib/markov";
-import { positionSizeUSD, stochrsiFilterPass, suggestTradeLevels } from "./lib/trading";
+import { blendRows, buildFeatures, conditionedRow } from "./lib/models/conditioning";
+import { LOGIT_MODEL } from "./lib/models/modelConfig";
+import { stepsForHorizon } from "./lib/models/horizons";
+import { buildMarkovWeighted, multiStepForecast, semiMarkovAdjustFirstRow, estimateDurations, computeRunLength, buildOrder2Counts, rowFromOrder2, PairKey } from "./lib/markov";
+import { positionSizeUSD, stochrsiFilterPass, suggestTradeLevels, executionFilters } from "./lib/trading";
 import { CandleRow, IDX, STATES, StateKey } from "./types/market";
 
 // NOTE: This file uses Tailwind utility classes for layout/responsiveness.
@@ -65,57 +68,104 @@ export default function App(){
   }, [candles, cfg]);
 
   // alignment shading timeline
-  const alignSeries = useMemo(()=>{
-    if(!calc) return [] as number[];
-    const rows:CandleRow[] = calc.rows; const states:string[] = calc.states;
-    const steps = horizons.map(h=> Math.round((h*60)/Number(interval)));
-    const nearest = steps.length? steps[0]: 1;
+  const alignSeries = useMemo(() => {
+    if (!calc) return [] as number[];
+    const rows: CandleRow[] = calc.rows;
+    const states = calc.states as StateKey[];
+    const nearestSteps = horizons.length ? stepsForHorizon(horizons[0], Number(interval), rows) : 1;
     const vals = new Array(rows.length).fill(0) as number[];
-    for(let t=250; t<rows.length-nearest; t++){
-      const histStates = states.slice(0,t+1);
-      const {probs} = buildMarkovWeighted(histStates, windowN, smooth, halfLife);
-      const cur = histStates[histStates.length-1] as StateKey;
-      const prow = semiMarkovAdjustFirstRow(probs[IDX[cur]], histStates);
-      const vec = multiStepForecast(probs, cur, {k: nearest}, prow)["k"];
-      const up = vec[IDX['U']] > vec[IDX['D']];
+    for (let t = 250; t < rows.length - nearestSteps; t++) {
+      const histStates = states.slice(0, t + 1) as StateKey[];
+      const { probs } = buildMarkovWeighted(histStates, windowN, smooth, halfLife);
+      const cur = histStates[histStates.length - 1];
+      const durations = estimateDurations(histStates);
+      const runLen = computeRunLength(histStates);
+      const baseRow = probs[IDX[cur]].slice();
+      const durationRow = semiMarkovAdjustFirstRow(baseRow, histStates, { durations, runLength: runLen });
+      const orderCounts = buildOrder2Counts(histStates);
+      const pair = histStates.length >= 2 ? (`${histStates[histStates.length - 2]}${cur}` as PairKey) : null;
+      const orderRow = pair ? rowFromOrder2(orderCounts, pair) : null;
+      const condRow = t >= 20 ? conditionedRow(buildFeatures(rows, t), LOGIT_MODEL) : null;
+      const components: number[][] = [durationRow];
+      const weights: number[] = [0.6];
+      if (orderRow) {
+        components.push(orderRow);
+        weights.push(0.25);
+      }
+      if (condRow) {
+        components.push(condRow);
+        weights.push(orderRow ? 0.15 : 0.4);
+      }
+      const blendedRow = blendRows(components, weights);
+      const vec = multiStepForecast(probs, cur, { k: nearestSteps }, blendedRow)["k"];
+      const up = vec[IDX["U"]] > vec[IDX["D"]];
       const kNow = rows[t].stochK ?? NaN;
-      const pass = up ? (kNow<=stochLo) : (kNow>=stochHi);
-      if(pass){ vals[t] = up? +1 : -1; }
+      const pass = up ? kNow <= stochLo : kNow >= stochHi;
+      if (pass) {
+        vals[t] = up ? 1 : -1;
+      }
     }
     return vals;
-  }, [calc, horizons, interval, windowN, smooth, halfLife, stochLo, stochHi]);
+  }, [calc, halfLife, horizons, interval, smooth, stochHi, stochLo, windowN]);
 
-// One-step forecast (current state row), with and without semi-Markov adjustment
+// One-step forecast variants (raw, duration, conditioned, blended)
 const oneStep = useMemo(() => {
   if (!calc) return null as any;
-  const cur = calc.curState as StateKey;
-  const raw = (calc as any).probs[IDX[cur]].slice() as number[];
-  const adj = semiMarkovAdjustFirstRow(raw, (calc as any).states as string[]);
-  return { cur, raw, adj };
+  return {
+    cur: calc.curState as StateKey,
+    raw: (calc.rowBase ?? []).slice(),
+    duration: (calc.rowDuration ?? []).slice(),
+    order2: calc.rowOrder2 ? calc.rowOrder2.slice() : null,
+    conditioned: calc.rowConditioned ? calc.rowConditioned.slice() : null,
+    blended: (calc.rowBlended ?? []).slice(),
+  };
 }, [calc]);
 
-
   // Trade suggestions text (pre-formatted)
-  const tradeText = useMemo(()=>{
-    if(!calc) return "";
-    const last:CandleRow = calc.rows[calc.rows.length-1];
+  const tradeText = useMemo(() => {
+    if (!calc) return "";
+    const last: CandleRow = calc.rows[calc.rows.length - 1];
     const lines = ["Trade suggestions (EMA50 retest + StochRSI timing):"];
-    (["short","long"] as const).forEach((side)=>{
-      const f = stochrsiFilterPass(last.stochK ?? NaN, side as any, stochMode, stochLo, stochHi);
-      lines.push(`- ${side.toUpperCase()} oscillator check: ${f.note}`);
-      if(!f.ok){ lines.push("  → BLOCKED by StochRSI."); return; }
-      const lv = suggestTradeLevels(last, calc.rows as CandleRow[], side as any, riskMode, rr, atrSL, atrTP, f.penalty);
+    (["short", "long"] as const).forEach((side) => {
+      const osc = stochrsiFilterPass(last.stochK ?? NaN, side as any, stochMode, stochLo, stochHi);
+      lines.push(`- ${side.toUpperCase()} oscillator check: ${osc.note}`);
+      if (!osc.ok) {
+        lines.push("  BLOCKED by StochRSI.");
+        return;
+      }
+      const exec = executionFilters(last, calc.rows as CandleRow[], {
+        side: side as any,
+        runLength: calc.runLength ?? 0,
+      });
+      if (!exec.ok) {
+        lines.push(`  Execution filters: BLOCK (${exec.notes.join(", ") || "conditions not met"})`);
+        lines.push("  BLOCKED by execution filters.");
+        return;
+      }
+      lines.push("  Execution filters: PASS");
+      const lv = suggestTradeLevels(
+        last,
+        calc.rows as CandleRow[],
+        side as any,
+        riskMode,
+        rr,
+        atrSL,
+        atrTP,
+        osc.penalty
+      );
       const sz = positionSizeUSD(account, riskPct, lv.entry, lv.stop, leverage, takerBps, makerBps);
       lines.push(`  Entry: ${lv.entry.toFixed(6)}  Stop: ${lv.stop.toFixed(6)}  Target: ${lv.target.toFixed(6)}`);
-      if(isFiniteNum(sz.notional)){ lines.push(`  Sizing: ~${sz.notional.toFixed(2)} USDT notional  (~${(sz.qty).toFixed(2)} coins)  @x${leverage}  fees≈${(2*takerBps).toFixed(1)} bps total`); }
+      if (isFiniteNum(sz.notional)) {
+        lines.push(`  Sizing: ~${sz.notional.toFixed(2)} USDT notional  (~${(sz.qty).toFixed(2)} coins)  @x${leverage}  fees~${(2 * takerBps).toFixed(1)} bps total`);
+      }
     });
-    return lines.join('');
-  }, [calc, stochMode, stochLo, stochHi, riskMode, rr, atrSL, atrTP, account, riskPct, leverage, takerBps, makerBps]);
+    return lines.join("");
+  }, [account, atrSL, atrTP, calc, leverage, makerBps, riskMode, riskPct, rr, stochHi, stochLo, stochMode, takerBps]);
 
   const footerText = useMemo(()=>{
     const auto = refreshSel===0 ? 'OFF' : (String(refreshSel)+' min');
-    let txt = 'Markov+RSI/StochRSI SPA • Auto refresh: '+auto+' • ' + (loading? 'Updating…':'Live');
-    if(error){ txt += ' • Error: '+error; }
+    let txt = 'Markov+RSI/StochRSI SPA | Auto refresh: '+auto+' | ' + (loading? 'Updating...':'Live');
+    if(error){ txt += ' | Error: '+error; }
     return txt;
   }, [refreshSel, loading, error]);
 
@@ -169,8 +219,8 @@ const oneStep = useMemo(() => {
           <NumL label="ATR SL" value={atrSL} set={setAtrSL} step={0.1} />
           <NumL label="ATR TP" value={atrTP} set={setAtrTP} step={0.1} />
           <SelectL label="StochRSI mode" value={stochMode} onChange={v=>setStochMode(v as any)} options={['hard','soft','off']} />
-          <NumL label="StochRSI ≤ (long)" value={stochLo} set={setStochLo} />
-          <NumL label="StochRSI ≥ (short)" value={stochHi} set={setStochHi} />
+          <NumL label="StochRSI <= (long)" value={stochLo} set={setStochLo} />
+          <NumL label="StochRSI >= (short)" value={stochHi} set={setStochHi} />
           <NumL label="Account" value={account} set={setAccount} />
           <NumL label="Risk %" value={riskPct} set={setRiskPct} />
           <div className="col-span-2 grid grid-cols-3 gap-2">
@@ -189,8 +239,8 @@ const oneStep = useMemo(() => {
           <NumL label="ATR SL" value={atrSL} set={setAtrSL} step={0.1} />
           <NumL label="ATR TP" value={atrTP} set={setAtrTP} step={0.1} />
           <SelectL label="StochRSI mode" value={stochMode} onChange={v=>setStochMode(v as any)} options={['hard','soft','off']} />
-          <NumL label="StochRSI ≤ (long)" value={stochLo} set={setStochLo} />
-          <NumL label="StochRSI ≥ (short)" value={stochHi} set={setStochHi} />
+          <NumL label="StochRSI <= (long)" value={stochLo} set={setStochLo} />
+          <NumL label="StochRSI >= (short)" value={stochHi} set={setStochHi} />
           <div className="grid grid-cols-3 gap-2 col-span-4 lg:col-span-2">
             <NumL label="Account" value={account} set={setAccount} />
             <NumL label="Risk %" value={riskPct} set={setRiskPct} />
@@ -213,7 +263,7 @@ const oneStep = useMemo(() => {
   {/* Heatmap */}
   <SectionCard title="Transition Probabilities">
     {!calc ? (
-      <div className="text-sm text-gray-500">{loading ? "Loading…" : "Not enough data"}</div>
+      <div className="text-sm text-gray-500">{loading ? "Loading..." : "Not enough data"}</div>
     ) : (
       <div className="grid grid-cols-5 gap-1 text-center">
         <div></div>
@@ -248,7 +298,7 @@ const oneStep = useMemo(() => {
   {/* Forecast bars (multi-step horizons) */}
   <SectionCard title="Markov Forecast (horizons)">
     {!calc ? (
-      <div className="text-sm text-gray-500">{loading ? "Loading…" : "No forecast"}</div>
+      <div className="text-sm text-gray-500">{loading ? "Loading..." : "No forecast"}</div>
     ) : (
       <div className="chart-300">
         <ResponsiveContainer width="100%" height="100%">
@@ -274,21 +324,22 @@ const oneStep = useMemo(() => {
     )}
   </SectionCard>
 
-  {/* NEW: Current state → next-step probabilities (raw vs semi-Markov adjusted) */}
+  {/* Current state next-step probabilities */}
   <SectionCard
-    title="Current state → next-step probabilities"
+    title="Current state next-step probabilities"
     right={oneStep && <span className="subtle-text">state: <b>{oneStep.cur}</b></span>}
   >
     {!calc || !oneStep ? (
-      <div className="text-sm text-gray-500">{loading ? "Loading…" : "No data"}</div>
+      <div className="text-sm text-gray-500">{loading ? "Loading." : "No data"}</div>
     ) : (
       <div className="h-[200px]">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={STATES.map((s) => ({
               state: s,
-              raw: oneStep.raw[IDX[s]],
-              adjusted: oneStep.adj[IDX[s]],
+              raw: (oneStep.raw ?? [])[IDX[s]] ?? 0,
+              duration: (oneStep.duration ?? [])[IDX[s]] ?? 0,
+              blended: (oneStep.blended ?? [])[IDX[s]] ?? 0,
             }))}
           >
             <CartesianGrid strokeDasharray="3 3" />
@@ -297,7 +348,8 @@ const oneStep = useMemo(() => {
             <Tooltip formatter={(v: any) => (Number(v) * 100).toFixed(1) + "%"} />
             <Legend />
             <Bar dataKey="raw" fill="#94a3b8" name="raw" />
-            <Bar dataKey="adjusted" fill="#0ea5e9" name="semi-Markov" />
+            <Bar dataKey="duration" fill="#0ea5e9" name="duration" />
+            <Bar dataKey="blended" fill="#fb923c" name="blended" />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -307,16 +359,16 @@ const oneStep = useMemo(() => {
   {/* Trade Suggestions */}
   <SectionCard title="Trade suggestions (EMA50 retest + StochRSI timing)">
     {!calc ? (
-      <div className="text-sm text-gray-500">{loading ? "Loading…" : "No data"}</div>
+      <div className="text-sm text-gray-500">{loading ? "Loading..." : "No data"}</div>
     ) : (
       <pre className="whitespace-pre-wrap text-[12px] leading-6 font-mono">{tradeText}</pre>
     )}
   </SectionCard>
 
-  {/* RSI & StochRSI — now moved to the bottom; full width on xl */}
-  <SectionCard title="RSI & StochRSI — shaded alignment (Markov + StochRSI)" className="xl:col-span-2">
+  {/* RSI & StochRSI - now moved to the bottom; full width on xl */}
+  <SectionCard title="RSI & StochRSI - shaded alignment (Markov + StochRSI)" className="xl:col-span-2">
     {!calc ? (
-      <div className="text-sm text-gray-500">{loading ? "Loading…" : "No data"}</div>
+      <div className="text-sm text-gray-500">{loading ? "Loading..." : "No data"}</div>
     ) : (
       <div className="chart-380">
         <ResponsiveContainer width="100%" height="100%">
@@ -368,4 +420,9 @@ const oneStep = useMemo(() => {
     </div>
   );
 }
+
+
+
+
+
 
