@@ -306,7 +306,7 @@ const oneStep = useMemo(() => {
           </div>
           <div className="min-w-[130px]"><div className="text-[10px] sm:text-xs text-gray-600">Interval (min)</div>
             <select className="border rounded px-2 py-1 w-full" value={interval} onChange={e=>setIntervalStr(e.target.value)}>
-              {['1','3','5','15','30','60','240'].map(v=> <option key={v} value={v}>{v}</option>)}
+              {['1','3','5','15','30','60','120','180','240'].map(v=> <option key={v} value={v}>{v}</option>)}
             </select>
           </div>
           <div className="min-w-[120px]"><div className="text-[10px] sm:text-xs text-gray-600">Window</div>
