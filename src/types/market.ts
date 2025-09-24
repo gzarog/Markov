@@ -21,4 +21,12 @@ export type CandleRow = {
   rsi?: number;
   stochK?: number;
   stochD?: number;
+  macd?: number;
+  macdSignal?: number;
+  macdHist?: number;
+  bbUpper?: number;
+  bbLower?: number;
+  bbBasis?: number;
+  bbWidth?: number;
+  vwap?: number;
 };

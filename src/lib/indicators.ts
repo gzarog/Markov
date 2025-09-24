@@ -99,3 +99,75 @@ export function stochRsi(rsi: number[], lengthStoch = 14, k = 3, d = 3) {
   const dLine = rollingMean(kLine, d);
   return { k: kLine, d: dLine };
 }
+
+export function rollingStd(arr: number[], n: number) {
+  const out = new Array(arr.length).fill(NaN) as number[];
+  for (let i = 0; i < arr.length; i++) {
+    if (i + 1 < n) continue;
+    let sum = 0;
+    let count = 0;
+    for (let k = i - n + 1; k <= i; k++) {
+      const value = arr[k];
+      if (!isFiniteNum(value)) continue;
+      sum += value;
+      count++;
+    }
+    if (count !== n) continue;
+    const mean = sum / count;
+    let variance = 0;
+    for (let k = i - n + 1; k <= i; k++) {
+      const value = arr[k];
+      variance += (value - mean) ** 2;
+    }
+    out[i] = Math.sqrt(variance / n);
+  }
+  return out;
+}
+
+export function macd(close: number[], fast = 12, slow = 26, signal = 9) {
+  if (!close.length) {
+    return { macd: [], signal: [], hist: [] };
+  }
+  const fastEma = ema(close, fast);
+  const slowEma = ema(close, slow);
+  const macdLine = close.map((_, i) => (fastEma[i] ?? 0) - (slowEma[i] ?? 0));
+  const signalLine = ema(macdLine, signal);
+  const hist = macdLine.map((value, i) => value - (signalLine[i] ?? 0));
+  return { macd: macdLine, signal: signalLine, hist };
+}
+
+export function bollingerBands(close: number[], period = 20, mult = 2) {
+  const basis = movingAverage(close, period);
+  const std = rollingStd(close, period);
+  const upper = close.map((_, i) => {
+    if (!isFiniteNum(basis[i]) || !isFiniteNum(std[i])) return NaN;
+    return (basis[i] ?? 0) + mult * (std[i] ?? 0);
+  });
+  const lower = close.map((_, i) => {
+    if (!isFiniteNum(basis[i]) || !isFiniteNum(std[i])) return NaN;
+    return (basis[i] ?? 0) - mult * (std[i] ?? 0);
+  });
+  const width = upper.map((value, i) => {
+    if (!isFiniteNum(value) || !isFiniteNum(lower[i])) return NaN;
+    return value - (lower[i] ?? 0);
+  });
+  return { upper, lower, basis, width };
+}
+
+export function cumulativeVwap(typical: number[], volume: number[]) {
+  const out = new Array(typical.length).fill(NaN) as number[];
+  let pvSum = 0;
+  let volSum = 0;
+  for (let i = 0; i < typical.length; i++) {
+    const price = typical[i];
+    const vol = volume[i];
+    if (!isFiniteNum(price) || !isFiniteNum(vol) || vol <= 0) {
+      out[i] = i > 0 ? out[i - 1] : NaN;
+      continue;
+    }
+    pvSum += price * vol;
+    volSum += vol;
+    out[i] = volSum > 0 ? pvSum / volSum : NaN;
+  }
+  return out;
+}

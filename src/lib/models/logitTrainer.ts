@@ -1,5 +1,5 @@
 import { CandleRow, StateKey, STATES } from "../../types/market";
-import { buildFeatures, defaultLogitModel, LogitModel } from "./conditioning";
+import { buildFeatures, LogitModel } from "./conditioning";
 import { isFiniteNum } from "../utils";
 
 const FEATURE_DIM = 10;
@@ -12,10 +12,9 @@ function softmax(logits: number[]) {
   return exps.map((value) => value / Z);
 }
 
-export function fitLogitModel(rows: CandleRow[], states: StateKey[]): LogitModel {
-  const model = defaultLogitModel();
+export function fitLogitModel(rows: CandleRow[], states: StateKey[]): LogitModel | null {
   if (rows.length < 120 || states.length !== rows.length) {
-    return model;
+    return null;
   }
 
   const samples: { x: number[]; label: number }[] = [];
@@ -29,7 +28,7 @@ export function fitLogitModel(rows: CandleRow[], states: StateKey[]): LogitModel
   }
 
   if (samples.length < 40) {
-    return model;
+    return null;
   }
 
   const mean = Array(FEATURE_DIM).fill(0);

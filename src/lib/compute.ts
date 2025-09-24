@@ -1,5 +1,5 @@
 import { CandleRow, IDX, StateKey } from "../types/market";
-import { atr14, ema, movingAverage, rsi14, stochRsi } from "./indicators";
+import { atr14, ema, movingAverage, rsi14, stochRsi, macd, bollingerBands, cumulativeVwap } from "./indicators";
 import {
   buildMarkovWeighted,
   buildOrder2Counts,
@@ -10,14 +10,15 @@ import {
   semiMarkovAdjustFirstRow,
   PairKey,
 } from "./markov";
-import { buildFeatures, conditionedRow, blendRows, defaultLogitModel } from "./models/conditioning";
+import { buildFeatures, conditionedRow, blendRows, defaultLogitModel, LogitModel } from "./models/conditioning";
 import { stepsForHorizon } from "./models/horizons";
 import { fitLogitModel } from "./models/logitTrainer";
 import { labelState } from "./stateClassifier";
 
 export function computeAll(
   candles: CandleRow[],
-  cfg: { window: number; halfLife: number; smooth: number; horizons: number[]; intervalMinutes: number }
+  cfg: { window: number; halfLife: number; smooth: number; horizons: number[]; intervalMinutes: number },
+  opts?: { prevLogitModel?: LogitModel }
 ) {
   const close = candles.map((c) => c.close);
   const high = candles.map((c) => c.high);
@@ -29,6 +30,12 @@ export function computeAll(
   const atr = atr14(high, low, close);
   const rsi = rsi14(close);
   const st = stochRsi(rsi, 14, 3, 3);
+
+  const macdData = macd(close);
+  const bb = bollingerBands(close);
+  const typical = candles.map((c) => (c.high + c.low + c.close) / 3);
+  const volumeSeries = candles.map((c) => (c.volume ?? NaN));
+  const vwap = cumulativeVwap(typical, volumeSeries);
 
   const rows = candles.map((c, i) => ({
     time: c.time,
@@ -45,6 +52,14 @@ export function computeAll(
     rsi: rsi[i],
     stochK: st.k[i],
     stochD: st.d[i],
+    macd: macdData.macd[i],
+    macdSignal: macdData.signal[i],
+    macdHist: macdData.hist[i],
+    bbUpper: bb.upper[i],
+    bbLower: bb.lower[i],
+    bbBasis: bb.basis[i],
+    bbWidth: bb.width[i],
+    vwap: vwap[i],
   })) as CandleRow[];
 
   const states = rows.map((r) => labelState(r)) as StateKey[];
@@ -53,7 +68,9 @@ export function computeAll(
   const durations = estimateDurations(states);
   const runLength = computeRunLength(states);
 
-  const logitModel = fitLogitModel(rows, states) ?? defaultLogitModel();
+  const trainedLogit = fitLogitModel(rows, states);
+  const fallbackLogit = opts?.prevLogitModel ?? defaultLogitModel();
+  const logitModel = trainedLogit ?? fallbackLogit;
 
   const rowBase = probs[IDX[curState]].slice();
   const rowDuration = semiMarkovAdjustFirstRow(rowBase, states, { durations, runLength });
