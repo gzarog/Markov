@@ -1,6 +1,18 @@
 import { CandleRow, IDX, StateKey } from "../types/market";
 import { atr14, ema, movingAverage, rsi14, stochRsi } from "./indicators";
-import { buildMarkovWeighted, multiStepForecast, semiMarkovAdjustFirstRow } from "./markov";
+import {
+  buildMarkovWeighted,
+  buildOrder2Counts,
+  computeRunLength,
+  estimateDurations,
+  multiStepForecast,
+  rowFromOrder2,
+  semiMarkovAdjustFirstRow,
+  PairKey,
+} from "./markov";
+import { buildFeatures, conditionedRow, blendRows } from "./models/conditioning";
+import { LOGIT_MODEL } from "./models/modelConfig";
+import { stepsForHorizon } from "./models/horizons";
 import { labelState } from "./stateClassifier";
 
 export function computeAll(
@@ -35,12 +47,53 @@ export function computeAll(
     stochD: st.d[i],
   })) as CandleRow[];
 
-  const states = rows.map((r) => labelState(r));
-  const { counts, probs } = buildMarkovWeighted(states.filter(Boolean), cfg.window, cfg.smooth, cfg.halfLife);
-  const curState = states[states.length - 1] as StateKey;
-  const firstAdj = semiMarkovAdjustFirstRow(probs[IDX[curState]], states.filter(Boolean));
-  const steps = Object.fromEntries(cfg.horizons.map((h) => [h + "h", Math.round((h * 60) / cfg.intervalMinutes)]));
-  const forecasts = multiStepForecast(probs, curState, steps, firstAdj);
+  const states = rows.map((r) => labelState(r)) as StateKey[];
+  const { counts, probs } = buildMarkovWeighted(states, cfg.window, cfg.smooth, cfg.halfLife);
+  const curState = states[states.length - 1];
+  const durations = estimateDurations(states);
+  const runLength = computeRunLength(states);
 
-  return { rows, states, probs, counts, curState, forecasts };
+  const rowBase = probs[IDX[curState]].slice();
+  const rowDuration = semiMarkovAdjustFirstRow(rowBase, states, { durations, runLength });
+
+  const order2Counts = buildOrder2Counts(states);
+  const lastPair: PairKey | null = states.length >= 2 ? `${states[states.length - 2]}${curState}` as PairKey : null;
+  const rowOrder2 = lastPair ? rowFromOrder2(order2Counts, lastPair) : null;
+
+  const features = rows.length > 20 ? buildFeatures(rows, rows.length - 1) : null;
+  const rowConditioned = features ? conditionedRow(features, LOGIT_MODEL) : null;
+
+  const components: number[][] = [rowDuration];
+  const weights: number[] = [0.6];
+  if (rowOrder2) {
+    components.push(rowOrder2);
+    weights.push(0.25);
+  }
+  if (rowConditioned) {
+    components.push(rowConditioned);
+    weights.push(rowOrder2 ? 0.15 : 0.4);
+  }
+  const rowBlended = blendRows(components, weights);
+
+  const steps = Object.fromEntries(
+    cfg.horizons.map((h) => [h + "h", stepsForHorizon(h, cfg.intervalMinutes, rows)])
+  );
+  const forecasts = multiStepForecast(probs, curState, steps, rowBlended);
+
+  return {
+    rows,
+    states,
+    probs,
+    counts,
+    curState,
+    forecasts,
+    rowBase,
+    rowDuration,
+    rowOrder2,
+    rowConditioned,
+    rowBlended,
+    durations,
+    runLength,
+    steps,
+  };
 }

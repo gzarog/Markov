@@ -2,6 +2,18 @@ import { IDX, StateKey, STATES } from "../types/market";
 
 const STATE_COUNT = STATES.length;
 
+type DurationMap = Record<StateKey, number[]>;
+export type PairKey = `${StateKey}${StateKey}`;
+
+function normalizeRow(row: number[]) {
+  const sum = row.reduce((acc, value) => acc + value, 0);
+  if (sum <= 0) {
+    const uniform = 1 / STATE_COUNT;
+    return Array(STATE_COUNT).fill(uniform);
+  }
+  return row.map((value) => value / sum);
+}
+
 export function decayWeights(length: number, halfLife: number) {
   if (halfLife <= 0) return Array(length).fill(1) as number[];
   const lambda = Math.log(2) / halfLife;
@@ -40,51 +52,121 @@ export function buildMarkovWeighted(states: string[], window: number, smoothing:
   return { counts, probs };
 }
 
-export function semiMarkovAdjustFirstRow(row: number[], states: string[]) {
-  const cur = states[states.length - 1] as StateKey;
-  if (!cur) return row;
-
+export function computeRunLength(states: StateKey[]) {
+  if (!states.length) return 0;
+  const cur = states[states.length - 1];
   let run = 1;
   for (let i = states.length - 2; i >= 0; i--) {
     if (states[i] === cur) run++;
     else break;
   }
+  return run;
+}
 
+export function estimateDurations(states: StateKey[]): DurationMap {
+  const out: DurationMap = { D: [], R: [], B: [], U: [] };
+  if (!states.length) return out;
+  let current = states[0];
+  let length = 1;
+  for (let i = 1; i < states.length; i++) {
+    if (states[i] === current) {
+      length++;
+    } else {
+      out[current].push(length);
+      current = states[i];
+      length = 1;
+    }
+  }
+  out[current].push(length);
+  (Object.keys(out) as StateKey[]).forEach((k) => {
+    if (!out[k].length) out[k].push(1);
+  });
+  return out;
+}
+
+function survivalProb(samples: number[], runLength: number) {
+  if (!samples.length) return 0.5;
+  const greater = samples.filter((value) => value > runLength).length;
+  return (greater + 1) / (samples.length + 2);
+}
+
+export function semiMarkovAdjustFirstRow(
+  row: number[],
+  states: StateKey[],
+  opts: { durations?: DurationMap; runLength?: number } = {}
+) {
+  if (!states.length) return row;
+  const cur = states[states.length - 1];
+  const base = row.slice();
+  const run = opts.runLength ?? computeRunLength(states);
+  const durations = opts.durations;
+
+  if (durations) {
+    const stayIdx = IDX[cur];
+    const stayBase = base[stayIdx] ?? 0;
+    const survival = survivalProb(durations[cur] ?? [], run);
+    const boostedStay = Math.min(0.995, Math.max(0.005, survival * Math.max(0.05, stayBase)));
+    const exitsSum = base.reduce((acc, value, idx) => (idx === stayIdx ? acc : acc + value), 0);
+    const scaled = base.map((value, idx) => {
+      if (idx === stayIdx) return boostedStay;
+      if (exitsSum <= 0) return (1 - boostedStay) / (STATE_COUNT - 1);
+      return value * ((1 - boostedStay) / exitsSum);
+    });
+    return normalizeRow(scaled);
+  }
+
+  // fallback to legacy heuristic if no durations provided
+  let runLegacy = 1;
+  for (let i = states.length - 2; i >= 0; i--) {
+    if (states[i] === cur) runLegacy++;
+    else break;
+  }
   const runs: number[] = [];
   let streak = 0;
   for (let i = 0; i < states.length; i++) {
     if (states[i] === cur) {
       streak++;
-    } else {
-      if (streak > 0) {
-        runs.push(streak);
-        streak = 0;
-      }
+    } else if (streak > 0) {
+      runs.push(streak);
+      streak = 0;
     }
   }
   if (streak > 0) runs.push(streak);
-
-  if (!runs.length) return row;
-
+  if (!runs.length) return normalizeRow(base);
   const sorted = [...runs].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
-  const adjusted = row.slice();
-
-  if (run < median) {
-    const boost = Math.min(0.15, 0.03 * (median - run));
+  if (runLegacy < median) {
+    const boost = Math.min(0.15, 0.03 * (median - runLegacy));
     const curIndex = IDX[cur];
-    adjusted[curIndex] = Math.min(1, adjusted[curIndex] + boost);
-
+    base[curIndex] = Math.min(1, base[curIndex] + boost);
     const others = Array.from({ length: STATE_COUNT }, (_, index) => index).filter((index) => index !== curIndex);
-    const remainder = 1 - adjusted[curIndex];
+    const remainder = 1 - base[curIndex];
     const restSum = others.reduce((acc, index) => acc + row[index], 0);
-
     others.forEach((index) => {
-      adjusted[index] = restSum ? (row[index] * remainder) / restSum : remainder / (STATE_COUNT - 1);
+      base[index] = restSum ? (row[index] * remainder) / restSum : remainder / (STATE_COUNT - 1);
     });
   }
+  return normalizeRow(base);
+}
 
-  return adjusted;
+export function buildOrder2Counts(states: StateKey[]): Record<PairKey, number[]> {
+  const table: Partial<Record<PairKey, number[]>> = {};
+  for (let i = 1; i + 1 < states.length; i++) {
+    const key = `${states[i - 1]}${states[i]}` as PairKey;
+    if (!table[key]) table[key] = Array(STATE_COUNT).fill(0);
+    const nextIdx = IDX[states[i + 1]];
+    table[key]![nextIdx] += 1;
+  }
+  return table as Record<PairKey, number[]>;
+}
+
+export function rowFromOrder2(table: Record<PairKey, number[]>, pair: PairKey, minCount = 12) {
+  const arr = table[pair];
+  if (!arr) return null;
+  const total = arr.reduce((acc, value) => acc + value, 0);
+  if (total < minCount) return null;
+  const smoothed = arr.map((value) => value + 0.5);
+  return normalizeRow(smoothed);
 }
 
 function matMul(A: number[][], B: number[][]) {

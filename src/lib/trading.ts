@@ -18,11 +18,11 @@ export function stochrsiFilterPass(
   if (mode === "off") return { ok: true, note: "StochRSI off", penalty: 1 };
   if (side === "long") {
     const cond = kVal <= lower;
-    const note = `K=${kVal.toFixed(1)} <= ${lower}  ${cond ? "PASS" : "BLOCK"}`;
+    const note = `K=${kVal.toFixed(1)} <= ${lower} -> ${cond ? "PASS" : "BLOCK"}`;
     return { ok: mode === "hard" ? cond : true, note, penalty: cond ? 1 : 0.75 };
   }
   const cond = kVal >= upper;
-  const note = `K=${kVal.toFixed(1)} >= ${upper}  ${cond ? "PASS" : "BLOCK"}`;
+  const note = `K=${kVal.toFixed(1)} >= ${upper} -> ${cond ? "PASS" : "BLOCK"}`;
   return { ok: mode === "hard" ? cond : true, note, penalty: cond ? 1 : 0.75 };
 }
 
@@ -90,4 +90,55 @@ export function positionSizeUSD(
   const qty = (riskAmt * leverage) / (riskPerUnit * entry);
   const notional = qty * entry;
   return { notional, qty };
+}
+
+export function executionFilters(
+  row: CandleRow,
+  hist: CandleRow[],
+  opts: {
+    side: TradeSide;
+    runLength: number;
+    minRunLength?: number;
+    minRangeRatio?: number;
+    maxRangeRatio?: number;
+    minBody?: number;
+  }
+) {
+  const notes: string[] = [];
+  let ok = true;
+
+  const minRun = opts.minRunLength ?? 2;
+  if (opts.runLength <= minRun) {
+    ok = false;
+    notes.push("State flip cooldown");
+  }
+
+  const lookback = hist.slice(-20);
+  const ranges = lookback
+    .map((bar) => Math.max(0, bar.high - bar.low))
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  const medRange = ranges.length ? ranges[Math.floor(ranges.length / 2)] : Math.max(1e-9, row.high - row.low);
+  const rangeNow = Math.max(1e-9, row.high - row.low);
+  const minRatio = opts.minRangeRatio ?? 0.5;
+  const maxRatio = opts.maxRangeRatio ?? 3.5;
+
+  if (rangeNow < medRange * minRatio) {
+    ok = false;
+    notes.push("Range too compressed");
+  }
+
+  if (rangeNow > medRange * maxRatio) {
+    ok = false;
+    notes.push("Range too extended");
+  }
+
+  const bodyFrac = Math.abs(row.close - row.open) / rangeNow;
+  const minBody = opts.minBody ?? 0.15;
+  if (bodyFrac < minBody) {
+    ok = false;
+    notes.push("Indecision bar");
+  }
+
+  return { ok, notes };
 }
