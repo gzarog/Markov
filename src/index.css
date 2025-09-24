@@ -1,0 +1,39 @@
+
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+/* ---- Tailwind-powered component classes ---- */
+@layer components {
+  .app-frame    { @apply min-h-screen bg-slate-50 text-slate-900; }
+  .app-header   { @apply sticky top-0 z-20 border-b bg-white/80; }
+  .header-inner { @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-wrap items-center gap-3; }
+  .status-dot   { @apply inline-block rounded-full; width: .5rem; height: .5rem; background: rgb(16 185 129); }
+  .btn-primary  { @apply px-3 py-1.5 rounded-md bg-slate-900 text-white text-xs sm:text-sm hover:bg-slate-800; }
+  .subtle-text  { @apply text-[11px] text-slate-500; }
+  .container    { @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8; }
+  .stack        { @apply space-y-6; }
+
+  .card         { @apply bg-white rounded-2xl shadow-sm ring-1 ring-slate-200/60 overflow-hidden; }
+  .card-header  { @apply px-4 py-3 border-b flex items-center justify-between; }
+  .card-title   { @apply text-base font-semibold text-slate-800; }
+  .card-body    { @apply p-4; }
+
+  .controls-grid      { @apply grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 xl:grid-cols-8 gap-3; }
+  .inputs-grid        { @apply grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3; }
+  .input              { @apply border rounded-md px-2 py-1.5 w-full; }
+  .footer             { @apply text-center text-xs text-gray-500 py-6; }
+
+  /* Chart container heights */
+  .chart-300 { height: 300px; }
+  .chart-380 { height: 300px; }
+}
+
+/* Nice blur header on supported browsers (replicates supports-[backdrop-filter]) */
+@supports ((backdrop-filter: blur(8px)) or (-webkit-backdrop-filter: blur(8px))) {
+  .app-header {
+    background-color: rgba(255,255,255,.7);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+}
