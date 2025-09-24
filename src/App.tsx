@@ -19,8 +19,7 @@ import { NumL, SelectL } from "./components/common/FormControls";
 import { useBybitData } from "./hooks/useBybitData";
 import { computeAll } from "./lib/compute";
 import { isFiniteNum } from "./lib/utils";
-import { blendRows, buildFeatures, conditionedRow } from "./lib/models/conditioning";
-import { LOGIT_MODEL } from "./lib/models/modelConfig";
+import { blendRows, buildFeatures, conditionedRow, defaultLogitModel } from "./lib/models/conditioning";
 import { stepsForHorizon } from "./lib/models/horizons";
 import { buildMarkovWeighted, multiStepForecast, semiMarkovAdjustFirstRow, estimateDurations, computeRunLength, buildOrder2Counts, rowFromOrder2, PairKey } from "./lib/markov";
 import { positionSizeUSD, stochrsiFilterPass, suggestTradeLevels, executionFilters } from "./lib/trading";
@@ -73,6 +72,7 @@ export default function App(){
     const rows: CandleRow[] = calc.rows;
     const states = calc.states as StateKey[];
     const nearestSteps = horizons.length ? stepsForHorizon(horizons[0], Number(interval), rows) : 1;
+    const logitModel = calc.logitModel ?? defaultLogitModel();
     const vals = new Array(rows.length).fill(0) as number[];
     for (let t = 250; t < rows.length - nearestSteps; t++) {
       const histStates = states.slice(0, t + 1) as StateKey[];
@@ -85,7 +85,7 @@ export default function App(){
       const orderCounts = buildOrder2Counts(histStates);
       const pair = histStates.length >= 2 ? (`${histStates[histStates.length - 2]}${cur}` as PairKey) : null;
       const orderRow = pair ? rowFromOrder2(orderCounts, pair) : null;
-      const condRow = t >= 20 ? conditionedRow(buildFeatures(rows, t), LOGIT_MODEL) : null;
+      const condRow = t >= 20 ? conditionedRow(buildFeatures(rows, t), logitModel) : null;
       const components: number[][] = [durationRow];
       const weights: number[] = [0.6];
       if (orderRow) {
@@ -108,7 +108,6 @@ export default function App(){
     return vals;
   }, [calc, halfLife, horizons, interval, smooth, stochHi, stochLo, windowN]);
 
-// One-step forecast variants (raw, duration, conditioned, blended)
 const oneStep = useMemo(() => {
   if (!calc) return null as any;
   return {

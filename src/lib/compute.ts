@@ -10,9 +10,9 @@ import {
   semiMarkovAdjustFirstRow,
   PairKey,
 } from "./markov";
-import { buildFeatures, conditionedRow, blendRows } from "./models/conditioning";
-import { LOGIT_MODEL } from "./models/modelConfig";
+import { buildFeatures, conditionedRow, blendRows, defaultLogitModel } from "./models/conditioning";
 import { stepsForHorizon } from "./models/horizons";
+import { fitLogitModel } from "./models/logitTrainer";
 import { labelState } from "./stateClassifier";
 
 export function computeAll(
@@ -53,15 +53,17 @@ export function computeAll(
   const durations = estimateDurations(states);
   const runLength = computeRunLength(states);
 
+  const logitModel = fitLogitModel(rows, states) ?? defaultLogitModel();
+
   const rowBase = probs[IDX[curState]].slice();
   const rowDuration = semiMarkovAdjustFirstRow(rowBase, states, { durations, runLength });
 
   const order2Counts = buildOrder2Counts(states);
-  const lastPair: PairKey | null = states.length >= 2 ? `${states[states.length - 2]}${curState}` as PairKey : null;
+  const lastPair: PairKey | null = states.length >= 2 ? (`${states[states.length - 2]}${curState}` as PairKey) : null;
   const rowOrder2 = lastPair ? rowFromOrder2(order2Counts, lastPair) : null;
 
   const features = rows.length > 20 ? buildFeatures(rows, rows.length - 1) : null;
-  const rowConditioned = features ? conditionedRow(features, LOGIT_MODEL) : null;
+  const rowConditioned = features ? conditionedRow(features, logitModel) : null;
 
   const components: number[][] = [rowDuration];
   const weights: number[] = [0.6];
@@ -95,5 +97,6 @@ export function computeAll(
     durations,
     runLength,
     steps,
+    logitModel,
   };
 }

@@ -7,6 +7,8 @@ export type LogitModel = {
   W: LogitWeights;
   b: LogitBias;
   temperature: number;
+  mean: number[];
+  std: number[];
 };
 
 const FEATURE_DIM = 10;
@@ -35,7 +37,9 @@ export function defaultLogitModel(): LogitModel {
   return {
     W: Array.from({ length: STATES.length }, () => Array(FEATURE_DIM).fill(0)),
     b: Array(STATES.length).fill(0),
-    temperature: 1.2,
+    temperature: 1.0,
+    mean: Array(FEATURE_DIM).fill(0),
+    std: Array(FEATURE_DIM).fill(1),
   };
 }
 
@@ -111,9 +115,14 @@ export function buildFeatures(rows: CandleRow[], index: number): FeatureVector {
 }
 
 export function conditionedRow(features: FeatureVector, model: LogitModel) {
+  const normalized = features.map((value, i) => {
+    const mu = model.mean[i] ?? 0;
+    const sigma = model.std[i] ?? 1;
+    return sigma > 1e-9 ? (value - mu) / sigma : value - mu;
+  });
   const logits = STATES.map((_, j) => {
     const weights = model.W[j] ?? [];
-    const dot = features.reduce((acc, value, f) => acc + value * (weights[f] ?? 0), 0);
+    const dot = normalized.reduce((acc, value, f) => acc + value * (weights[f] ?? 0), 0);
     return (model.b[j] ?? 0) + dot;
   });
   const temperature = Math.max(1e-6, model.temperature ?? 1);
